@@ -14,6 +14,8 @@ Scan your filesystem, visualize where space is going with a zoomable D3.js treem
 
 > Built for macOS (Apple Silicon). Linux supported on a best-effort basis.
 
+![Disk Manager UI — zoomable treemap visualization](thumbnail.jpg)
+
 ## Quick start
 
 ```bash
