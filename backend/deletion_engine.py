@@ -16,7 +16,7 @@ except ImportError:
     _send2trash = None
     logger.warning(
         "send2trash is not installed. Trash-based deletion will not be available. "
-        "Install it with: pip install send2trash"
+        "Install it with: uv add send2trash"
     )
 
 
@@ -89,7 +89,7 @@ def _trash_item(path: str) -> None:
     if _send2trash is None:
         raise RuntimeError(
             "send2trash is not installed. Cannot move items to Trash. "
-            "Install it with: pip install send2trash"
+            "Install it with: uv add send2trash"
         )
     _send2trash.send2trash(path)
 

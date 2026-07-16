@@ -18,14 +18,23 @@ Scan your filesystem, visualize where space is going with a zoomable D3.js treem
 
 ## Quick start
 
+Uses [`uv`](https://docs.astral.sh/uv/). `uv sync` creates the environment from `pyproject.toml` / `uv.lock` — no manual venv or `pip install` needed.
+
 ```bash
-make install   # creates .venv, installs deps
-make run       # starts on http://localhost:8000
-make test      # runs pytest
-PORT=9000 make run  # custom port
+uv sync                                                                # install deps (first run only)
+uv run python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload   # http://localhost:8000
+uv run python -m pytest tests/ -v                                      # run tests
 ```
 
-Requires Python 3.11+. Optional: `ffmpeg` for video thumbnails (`brew install ffmpeg`).
+Or via the (uv-backed) Makefile:
+
+```bash
+make run              # starts on http://localhost:8000
+make test             # runs pytest
+PORT=9000 make run    # custom port
+```
+
+Requires Python 3.11+ and `uv`. Optional: `ffmpeg` for video thumbnails (`brew install ffmpeg`).
 
 ## Architecture overview
 
@@ -53,8 +62,9 @@ Frontend is vanilla JS + D3.js (no build step). FastAPI serves it as static file
 
 ```
 disk_manager/
-  Makefile              # install, run, test, clean
-  requirements.txt      # Python deps
+  pyproject.toml        # Python deps + project metadata (uv)
+  uv.lock               # pinned dependency lockfile
+  Makefile              # uv-backed install, run, test, clean
   config.json           # auto-created on first run
   scans/                # per-session SQLite DBs
   backend/
@@ -217,7 +227,7 @@ D3.js treemap: cells colored by file category (image=blue, video=red, audio=oran
 ## Testing
 
 ```bash
-make test   # or: .venv/bin/python -m pytest tests/ -v
+uv run python -m pytest tests/ -v
 ```
 
 44 tests covering all backend modules. Tests use `tmp_path` fixtures — no real files are ever deleted. Key test areas:
