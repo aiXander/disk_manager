@@ -1,92 +1,63 @@
-"""Tests for deletion_engine — CRITICAL: never delete real files."""
+"""Tests for deletion_engine. Only ever touches files under tmp_path, permanent mode only."""
 
-import os
-from pathlib import Path
-
-import pytest
-
-from backend.deletion_engine import DeletionResult, _deduplicate_paths, execute_deletion
+from backend.deletion_engine import MISSING_ERROR, DeletionResult, _deduplicate_paths, execute_deletion
 
 
 def test_deletion_result_to_dict():
-    r = DeletionResult(
-        deleted=["/a/b.txt"],
-        failed=[("/a/c.txt", "PermissionError")],
-        bytes_freed=1024,
-    )
-    d = r.to_dict()
-    assert d["deleted"] == ["/a/b.txt"]
-    assert d["failed"] == [{"path": "/a/c.txt", "error": "PermissionError"}]
-    assert d["bytes_freed"] == 1024
+    d = DeletionResult(deleted=["/a/b"], failed=[("/a/c", "PermissionError")], bytes_freed=1).to_dict()
+    assert d == {"deleted": ["/a/b"], "failed": [{"path": "/a/c", "error": "PermissionError"}], "bytes_freed": 1}
 
 
-def test_deduplicate_paths_removes_children():
-    paths = ["/a/b/c.txt", "/a/b", "/a/b/d.txt", "/x/y.txt"]
-    # /a/b is a directory (need it to exist for is_dir check).
-    # Since _deduplicate_paths calls Path.is_dir(), we test with real tmp paths.
-    pass  # Tested via test_deduplicate_with_real_dirs below
+def test_deduplicate_drops_descendants_without_disk_access():
+    paths = ["/x/a/b/c.txt", "/x/a", "/x/ab.txt", "/x/a"]
+    assert _deduplicate_paths(paths) == ["/x/a", "/x/ab.txt"]
 
 
-def test_deduplicate_with_real_dirs(tmp_path):
-    # Create structure: parent_dir/child.txt
-    parent = tmp_path / "parent"
-    parent.mkdir()
-    child = parent / "child.txt"
-    child.write_text("hello")
-    other = tmp_path / "other.txt"
-    other.write_text("world")
-
-    paths = [str(child), str(parent), str(other)]
-    result = _deduplicate_paths(paths)
-
-    # parent is a dir, child is inside it — child should be removed
-    assert str(parent) in result
-    assert str(other) in result
-    assert str(child) not in result
-
-
-def test_execute_deletion_permanent(tmp_path):
-    """Permanently delete files in a temp directory."""
-    f1 = tmp_path / "file1.txt"
-    f1.write_text("data1")
-    f2 = tmp_path / "file2.txt"
-    f2.write_text("data2")
-
-    result = execute_deletion([str(f1), str(f2)], permanent=True)
-
-    assert str(f1) in result.deleted
-    assert str(f2) in result.deleted
-    assert not f1.exists()
-    assert not f2.exists()
-    assert result.bytes_freed > 0
-    assert len(result.failed) == 0
-
-
-def test_execute_deletion_nonexistent(tmp_path):
-    """Deleting a nonexistent file should fail gracefully."""
-    fake = str(tmp_path / "nonexistent.txt")
-    result = execute_deletion([fake], permanent=True)
-
-    assert len(result.deleted) == 0
-    assert len(result.failed) == 1
-    assert result.failed[0][0] == fake
-
-
-def test_execute_deletion_directory(tmp_path):
-    """Permanently delete a directory."""
-    d = tmp_path / "mydir"
+def test_permanent_delete_counts_db_sizes(tmp_path):
+    f1, d = tmp_path / "f1.txt", tmp_path / "dir"
+    f1.write_text("data")
     d.mkdir()
-    (d / "inside.txt").write_text("inner")
-
-    result = execute_deletion([str(d)], permanent=True)
-
-    assert str(d) in result.deleted
-    assert not d.exists()
-
-
-def test_execute_deletion_empty_list():
-    """Empty path list should return empty result."""
-    result = execute_deletion([], permanent=True)
-    assert result.deleted == []
+    (d / "inner.txt").write_text("inner")
+    paths = [str(f1), str(d), str(d / "inner.txt")]
+    result = execute_deletion(paths, permanent=True, sizes={str(f1): 4096, str(d): 8192})
+    assert sorted(result.deleted) == sorted([str(f1), str(d)])
+    assert result.bytes_freed == 4096 + 8192
+    assert not f1.exists() and not d.exists()
     assert result.failed == []
-    assert result.bytes_freed == 0
+
+
+def test_missing_path_reported(tmp_path):
+    fake = str(tmp_path / "gone.txt")
+    result = execute_deletion([fake], permanent=True, sizes={fake: 100})
+    assert result.deleted == [] and result.bytes_freed == 0
+    assert result.failed == [(fake, MISSING_ERROR)]
+    assert result.missing == [fake]
+
+
+def test_symlink_to_dir_removes_link_only(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    result = execute_deletion([str(link)], permanent=True)
+    assert result.deleted == [str(link)]
+    assert (target / "keep.txt").exists()
+
+
+def test_trash_failure_never_falls_back_to_permanent(tmp_path, monkeypatch):
+    import backend.deletion_engine as de
+
+    def boom(path):
+        raise OSError("trash unavailable")
+
+    monkeypatch.setattr(de, "_trash", boom)
+    f = tmp_path / "f.txt"
+    f.write_text("x")
+    result = execute_deletion([str(f)], permanent=False)
+    assert f.exists()
+    assert result.deleted == [] and "trash unavailable" in result.failed[0][1]
+
+
+def test_empty_list():
+    assert execute_deletion([], permanent=True).to_dict() == {"deleted": [], "failed": [], "bytes_freed": 0}

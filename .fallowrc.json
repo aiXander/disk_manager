@@ -1,0 +1,5 @@
+{
+  "entry": ["frontend/js/app.js", "frontend/styles.css"],
+  "ignorePatterns": ["frontend/vendor/**"],
+  "usedClassMembers": ["clear", "zoomInto", "setSelected"]
+}

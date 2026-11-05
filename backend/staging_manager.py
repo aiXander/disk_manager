@@ -1,133 +1,116 @@
-"""Manages the staging queue for files/directories to be deleted.
+"""Staging queue for files/directories to be deleted.
 
-Backed by a ``staged_items`` table in the scan-session SQLite DB for
-crash-safe persistence.  An in-memory dict provides fast access.
+The ``staged_items`` table in the scan DB is the single source of truth (no
+in-memory copy), so any connection/thread sees the same state. Sizes in the
+returned state come from the live ``nodes`` rows, so they stay correct after
+partial deletions shrink a staged directory.
 """
 
 from __future__ import annotations
 
-import logging
+import os
 import sqlite3
-from dataclasses import asdict, dataclass
 
-logger = logging.getLogger(__name__)
-
-
-@dataclass
-class StagedItem:
-    path: str
-    name: str
-    size: int
-    is_dir: bool
-    extension: str
+_CHUNK = 500  # stay well under SQLite's bound-parameter limit
 
 
-@dataclass
-class StagingState:
-    items: list[StagedItem]
-    total_size: int
-    count_by_extension: dict[str, int]
-    dir_count: int
-    file_count: int
+def _chunks(values: list[str]):
+    for i in range(0, len(values), _CHUNK):
+        yield values[i:i + _CHUNK]
 
-    def to_dict(self) -> dict:
-        return {
-            "items": [asdict(item) for item in self.items],
-            "total_size": self.total_size,
-            "count_by_extension": self.count_by_extension,
-            "dir_count": self.dir_count,
-            "file_count": self.file_count,
-        }
+
+def covered_by_staged_dir(path: str, staged_dirs: set[str]) -> bool:
+    """True if some strict ancestor of *path* is in *staged_dirs*."""
+    parent = os.path.dirname(path)
+    while parent and parent not in staged_dirs:
+        nxt = os.path.dirname(parent)
+        if nxt == parent:
+            return False
+        parent = nxt
+    return bool(parent)
 
 
 class StagingManager:
-    """Manages a staging queue backed by SQLite."""
+    """Thin, stateless wrapper around ``staged_items`` on one connection."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
-        self._items: dict[str, StagedItem] = {}
-        self._load_from_db()
 
-    def _load_from_db(self) -> None:
-        """Load staged items from the DB into memory."""
-        try:
-            rows = self._conn.execute("SELECT * FROM staged_items").fetchall()
-            for row in rows:
-                self._items[row["path"]] = StagedItem(
-                    path=row["path"],
-                    name=row["name"],
-                    size=row["size"],
-                    is_dir=bool(row["is_dir"]),
-                    extension=row["extension"],
+    def add(self, paths: list[str]) -> dict:
+        """Stage paths that exist in the scan data; unknown paths are ignored."""
+        with self._conn:
+            for chunk in _chunks(list(dict.fromkeys(paths))):
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO staged_items (path, name, size, is_dir, extension) "
+                    "SELECT path, name, size, is_dir, extension FROM nodes "
+                    f"WHERE path IN ({', '.join('?' for _ in chunk)})",
+                    chunk,
                 )
-        except sqlite3.OperationalError:
-            # Table may not exist yet if schema hasn't been applied.
-            pass
+        return self.state()
 
-    def add_items(self, items: list[dict]) -> StagingState:
-        """Add items to the staging queue. Deduplicates by path."""
+    def remove(self, paths: list[str]) -> dict:
+        with self._conn:
+            for chunk in _chunks(list(paths)):
+                self._conn.execute(
+                    f"DELETE FROM staged_items WHERE path IN ({', '.join('?' for _ in chunk)})",
+                    chunk,
+                )
+        return self.state()
+
+    def remove_subtrees(self, roots: list[str]) -> None:
+        """Unstage each root and everything staged beneath it."""
+        with self._conn:
+            for root in roots:
+                base = root.rstrip("/")
+                self._conn.execute(
+                    "DELETE FROM staged_items WHERE path = ? OR (path >= ? AND path < ?)",
+                    (root, base + "/", base + "0"),
+                )
+
+    def clear(self) -> dict:
+        with self._conn:
+            self._conn.execute("DELETE FROM staged_items")
+        return self.state()
+
+    def items(self) -> list[dict]:
+        """Staged items, with name/size refreshed from ``nodes`` when present."""
+        rows = self._conn.execute(
+            "SELECT s.path, COALESCE(n.name, s.name) AS name, COALESCE(n.size, s.size) AS size, "
+            "COALESCE(n.is_dir, s.is_dir) AS is_dir, COALESCE(n.extension, s.extension) AS extension "
+            "FROM staged_items s LEFT JOIN nodes n ON n.path = s.path ORDER BY size DESC"
+        ).fetchall()
+        return [
+            {
+                "path": r["path"],
+                "name": r["name"],
+                "size": r["size"],
+                "is_dir": bool(r["is_dir"]),
+                "extension": r["extension"] or "",
+            }
+            for r in rows
+        ]
+
+    def state(self) -> dict:
+        """``{items, total_size, item_count, dir_count, file_count}``.
+
+        An item staged inside an already-staged directory is listed (with
+        ``covered: true``) but not added to ``total_size`` again.
+        """
+        items = self.items()
+        staged_dirs = {i["path"] for i in items if i["is_dir"]}
+        total_size = dir_count = file_count = 0
         for item in items:
-            path = item["path"]
-            staged = StagedItem(
-                path=path,
-                name=item["name"],
-                size=item["size"],
-                is_dir=item["is_dir"],
-                extension=item["extension"],
-            )
-            self._items[path] = staged
-            self._conn.execute(
-                "INSERT OR REPLACE INTO staged_items (path, name, size, is_dir, extension) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (path, staged.name, staged.size, int(staged.is_dir), staged.extension),
-            )
-        self._conn.commit()
-        return self.get_state()
-
-    def remove_items(self, paths: list[str]) -> StagingState:
-        """Remove items from the staging queue by path."""
-        for path in paths:
-            self._items.pop(path, None)
-        if paths:
-            placeholders = ", ".join("?" for _ in paths)
-            self._conn.execute(
-                f"DELETE FROM staged_items WHERE path IN ({placeholders})", paths
-            )
-            self._conn.commit()
-        return self.get_state()
-
-    def clear(self) -> None:
-        """Clear all staged items."""
-        self._items.clear()
-        self._conn.execute("DELETE FROM staged_items")
-        self._conn.commit()
-
-    def get_state(self) -> StagingState:
-        """Compute and return the current staging state with aggregates."""
-        items = list(self._items.values())
-        total_size = sum(item.size for item in items)
-
-        count_by_extension: dict[str, int] = {}
-        dir_count = 0
-        file_count = 0
-
-        for item in items:
-            if item.is_dir:
+            item["covered"] = covered_by_staged_dir(item["path"], staged_dirs)
+            if not item["covered"]:
+                total_size += item["size"]
+            if item["is_dir"]:
                 dir_count += 1
             else:
                 file_count += 1
-            count_by_extension[item.extension] = (
-                count_by_extension.get(item.extension, 0) + 1
-            )
-
-        return StagingState(
-            items=items,
-            total_size=total_size,
-            count_by_extension=count_by_extension,
-            dir_count=dir_count,
-            file_count=file_count,
-        )
-
-    def get_paths(self) -> list[str]:
-        """Return all staged paths."""
-        return list(self._items.keys())
+        return {
+            "items": items,
+            "total_size": total_size,
+            "item_count": len(items),
+            "dir_count": dir_count,
+            "file_count": file_count,
+        }

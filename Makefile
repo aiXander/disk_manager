@@ -12,5 +12,5 @@ test: install
 	uv run python -m pytest tests/ -v
 
 clean:
-	rm -rf .venv scans/*.db __pycache__ backend/__pycache__ tests/__pycache__
+	rm -rf .venv scans/*.db scans/*.db-wal scans/*.db-shm __pycache__ backend/__pycache__ tests/__pycache__
 	find . -name '*.pyc' -delete

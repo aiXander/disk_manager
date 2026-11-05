@@ -3,344 +3,108 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
   <title>Disk Manager</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='1' width='8' height='14' rx='1' fill='%234e9af1'/%3E%3Crect x='10' y='1' width='5' height='8' rx='1' fill='%23b88de8'/%3E%3Crect x='10' y='10' width='5' height='5' rx='1' fill='%23ff7eb6'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
-  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="vendor/d3.v7.min.js"></script>
 </head>
 <body>
-  <!-- Top Bar -->
-  <header id="top-bar">
-    <div class="top-bar-left">
-      <svg class="app-icon" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="12" r="10"/>
-        <circle cx="12" cy="12" r="3"/>
-        <line x1="12" y1="2" x2="12" y2="5"/>
-      </svg>
-      <h1 class="app-title">Disk Manager</h1>
-    </div>
-    <div class="top-bar-right">
-      <button id="config-btn" class="icon-btn" aria-label="Settings" title="Settings">
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="3"/>
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33
-            1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06
-            a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09
-            A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68
-            a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06
-            a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09
-            a1.65 1.65 0 0 0-1.51 1z"/>
-        </svg>
-      </button>
-    </div>
-  </header>
-
-  <!-- Left Sidebar -->
-  <aside id="left-sidebar">
-    <section id="scan-panel">
-      <h2 class="panel-heading">Scan</h2>
-      <div class="scan-inputs">
-        <label for="scan-path-input" class="input-label">Root Path</label>
-        <div class="input-row">
-          <input type="text" id="scan-path-input" placeholder="/Users/you/Documents" spellcheck="false">
-          <button id="browse-btn" class="btn btn-ghost" title="Browse">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
-          </button>
-        </div>
-
-        <label for="scan-depth" class="input-label">Max Depth</label>
-        <input type="number" id="scan-depth" value="10" min="1" max="50">
-
-        <label for="scan-exclude" class="input-label">Exclude Patterns</label>
-        <input type="text" id="scan-exclude" placeholder="node_modules, .git, __pycache__">
+  <div id="app" data-screen="boot">
+    <header class="titlebar">
+      <div class="brand" aria-hidden="true">
+        <svg viewBox="0 0 16 16" width="16" height="16"><rect x="1" y="1" width="8" height="14" rx="1.5" fill="#4e9af1"/><rect x="10" y="1" width="5" height="8" rx="1.5" fill="#b88de8"/><rect x="10" y="10" width="5" height="5" rx="1.5" fill="#ff7eb6"/></svg>
       </div>
-
-      <button id="scan-btn" class="btn btn-primary btn-block">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-        </svg>
-        Start Scan
+      <button id="scan-switch" class="scan-switch" type="button" aria-haspopup="dialog" title="Switch scan">
+        <span class="scan-switch-name">Disk Manager</span>
+        <span class="scan-switch-meta"></span>
+        <svg class="chev" viewBox="0 0 10 10" width="9" height="9" aria-hidden="true"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
       </button>
+      <nav id="crumbs" class="crumbs" aria-label="Folder path"></nav>
+      <div class="titlebar-tools">
+        <div class="seg" role="tablist" aria-label="View">
+          <button type="button" role="tab" data-view="map" aria-selected="true" title="Map view (1)">Map</button>
+          <button type="button" role="tab" data-view="list" aria-selected="false" title="List view (2)">List</button>
+        </div>
+        <button id="btn-back" class="btn btn-ghost btn-sm" type="button">Back to results</button>
+        <button id="btn-new-scan" class="btn btn-ghost btn-sm" type="button" title="Scan other folders">New scan</button>
+        <button id="btn-settings" class="icon-btn" type="button" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M8 5.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6Zm0 4.3a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm6.3-2.3-1.3-.3a5 5 0 0 0-.5-1.2l.7-1.1a.6.6 0 0 0-.1-.8l-1-1a.6.6 0 0 0-.8-.1l-1.1.7a5 5 0 0 0-1.2-.5L8.8 1.7A.6.6 0 0 0 8.2 1.2H6.8a.6.6 0 0 0-.6.5L6 3a5 5 0 0 0-1.2.5l-1.1-.7a.6.6 0 0 0-.8.1l-1 1a.6.6 0 0 0-.1.8l.7 1.1A5 5 0 0 0 2 7l-1.3.2a.6.6 0 0 0-.5.6v1.4c0 .3.2.6.5.6L2 10a5 5 0 0 0 .5 1.2l-.7 1.1c-.2.3-.1.6.1.8l1 1c.2.2.5.3.8.1l1.1-.7c.4.2.8.4 1.2.5l.2 1.3c.1.3.3.5.6.5h1.4c.3 0 .6-.2.6-.5l.2-1.3c.4-.1.8-.3 1.2-.5l1.1.7c.3.2.6.1.8-.1l1-1c.2-.2.3-.5.1-.8l-.7-1.1c.2-.4.4-.8.5-1.2l1.3-.2c.3-.1.5-.3.5-.6V7.8c0-.3-.2-.5-.5-.6Z"/></svg>
+        </button>
+      </div>
+    </header>
 
-      <div id="scan-progress" class="progress-container hidden">
-        <div class="progress-label">
-          <span id="progress-text">Scanning...</span>
-          <span id="progress-pct">0%</span>
+    <!-- Home: pick folders + previous scans -->
+    <section id="home" class="screen" aria-label="Start">
+      <div class="home-grid">
+        <div class="home-start">
+          <h1 class="home-title">Find what's filling your disk</h1>
+          <p class="home-lede">Pick one or more folders. Disk Manager measures everything inside them, then lets you mark files and folders for removal. Nothing is deleted until you review the list and confirm.</p>
+          <form id="scan-form" class="scan-form" autocomplete="off">
+            <label class="field-label" for="scan-path">Folders to scan</label>
+            <div class="path-box" id="path-box">
+              <div class="path-chips" id="path-chips"></div>
+              <input id="scan-path" type="text" spellcheck="false" placeholder="~/Documents">
+            </div>
+            <div class="quick-picks" id="quick-picks"></div>
+            <div class="scan-form-row">
+              <button type="submit" class="btn btn-primary btn-lg" id="btn-scan">Scan</button>
+              <span class="form-hint" id="scan-hint">Separate several folders with a comma. Sizes are space used on disk, so they match what you get back.</span>
+            </div>
+          </form>
         </div>
-        <div class="progress-track">
-          <div id="progress-bar" class="progress-fill"></div>
+        <div class="home-history">
+          <div class="section-head">
+            <h2>Previous scans</h2>
+            <span class="section-sub" id="history-sub"></span>
+          </div>
+          <ul class="scan-list" id="scan-list"></ul>
         </div>
-        <p id="progress-detail" class="progress-detail">Preparing...</p>
       </div>
     </section>
 
-    <hr class="sidebar-divider">
-
-    <section id="filter-bar">
-      <h2 class="panel-heading">Filters</h2>
-
-      <label for="filter-category" class="input-label">Category</label>
-      <select id="filter-category">
-        <option value="all">All Categories</option>
-        <option value="image">Images</option>
-        <option value="video">Videos</option>
-        <option value="audio">Audio</option>
-        <option value="document">Documents</option>
-        <option value="code">Code</option>
-        <option value="archive">Archives</option>
-        <option value="other">Other</option>
-      </select>
-
-      <label for="filter-min-size" class="input-label">Min Size</label>
-      <div class="input-row">
-        <input type="number" id="filter-min-size" placeholder="0" min="0">
-        <select id="filter-min-unit" class="unit-select">
-          <option value="MB">MB</option>
-          <option value="GB">GB</option>
-          <option value="KB">KB</option>
-        </select>
-      </div>
-
-      <label for="filter-max-size" class="input-label">Max Size</label>
-      <div class="input-row">
-        <input type="number" id="filter-max-size" placeholder="No limit" min="0">
-        <select id="filter-max-unit" class="unit-select">
-          <option value="GB">GB</option>
-          <option value="MB">MB</option>
-          <option value="KB">KB</option>
-        </select>
-      </div>
-
-      <label for="filter-modified" class="input-label">Last Modified</label>
-      <select id="filter-modified">
-        <option value="any">Any Time</option>
-        <option value="7d">Last 7 Days</option>
-        <option value="30d">Last 30 Days</option>
-        <option value="90d">Last 90 Days</option>
-        <option value="1y">Last Year</option>
-        <option value="older">Older Than 1 Year</option>
-      </select>
-
-      <label for="filter-search" class="input-label">Name Search</label>
-      <input type="text" id="filter-search" placeholder="Filter by name...">
-
-      <button id="filter-apply-btn" class="btn btn-secondary btn-block">Apply Filters</button>
-      <button id="filter-reset-btn" class="btn btn-ghost btn-block">Reset</button>
-    </section>
-  </aside>
-
-  <!-- Main Content Area -->
-  <main id="main-view">
-    <div class="view-toolbar">
-      <div class="view-toggle">
-        <button id="view-treemap-btn" class="toggle-btn active" title="Treemap View">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/>
-            <rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/>
-          </svg>
-          Treemap
-        </button>
-        <button id="view-topn-btn" class="toggle-btn" title="Top-N List">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/>
-            <line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/>
-            <line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
-          </svg>
-          Top-N
-        </button>
-      </div>
-      <div class="view-info">
-        <span id="view-item-count" class="view-stat">0 items</span>
-        <span class="view-stat-sep">&middot;</span>
-        <span id="view-total-size" class="view-stat">0 B</span>
-      </div>
-    </div>
-
-    <div id="treemap-container" class="view-container active">
-      <div class="empty-state">
-        <svg viewBox="0 0 24 24" width="64" height="64" fill="none" stroke="currentColor" stroke-width="1">
-          <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>
-          <line x1="12" y1="2" x2="12" y2="5"/>
-          <line x1="12" y1="19" x2="12" y2="22"/>
-          <line x1="2" y1="12" x2="5" y2="12"/>
-          <line x1="19" y1="12" x2="22" y2="12"/>
-        </svg>
-        <p>Enter a path and click <strong>Start Scan</strong> to visualize disk usage.</p>
-      </div>
-    </div>
-
-    <div id="topn-container" class="view-container">
-      <table id="topn-table" class="topn-table">
-        <thead>
-          <tr>
-            <th class="col-rank">#</th>
-            <th class="col-name sortable" data-sort="name">Name</th>
-            <th class="col-size sortable active-sort" data-sort="size">Size</th>
-            <th class="col-category">Category</th>
-            <th class="col-modified sortable" data-sort="modified">Modified</th>
-            <th class="col-actions">Actions</th>
-          </tr>
-        </thead>
-        <tbody id="topn-body">
-        </tbody>
-      </table>
-    </div>
-  </main>
-
-  <!-- Right Sidebar (Preview Panel) -->
-  <aside id="preview-panel" class="panel-closed">
-    <div class="preview-header">
-      <h2 class="panel-heading">Preview</h2>
-      <button id="preview-close-btn" class="icon-btn" aria-label="Close preview">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-        </svg>
-      </button>
-    </div>
-
-    <div class="preview-body">
-      <div id="preview-thumbnail" class="preview-thumbnail">
-        <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-          <polyline points="14 2 14 8 20 8"/>
-        </svg>
-      </div>
-
-      <div id="preview-meta" class="preview-meta">
-        <dl class="meta-list">
-          <dt>Name</dt>
-          <dd id="preview-name">--</dd>
-
-          <dt>Path</dt>
-          <dd id="preview-path" class="mono">--</dd>
-
-          <dt>Size</dt>
-          <dd id="preview-size">--</dd>
-
-          <dt>Category</dt>
-          <dd id="preview-category">--</dd>
-
-          <dt>Modified</dt>
-          <dd id="preview-modified">--</dd>
-
-          <dt>Created</dt>
-          <dd id="preview-created">--</dd>
-
-          <dt>Permissions</dt>
-          <dd id="preview-perms">--</dd>
+    <!-- Live scan progress -->
+    <section id="scanning" class="screen" aria-label="Scanning" aria-live="polite">
+      <div class="scan-live">
+        <div class="scan-live-roots" id="live-roots"></div>
+        <div class="scan-live-main">
+          <div class="live-big"><span id="live-bytes">0 B</span></div>
+          <div class="live-caption" id="live-caption">found so far</div>
+        </div>
+        <div class="sweep" aria-hidden="true"><div class="sweep-bar"></div></div>
+        <div class="live-path" id="live-path" title=""></div>
+        <dl class="live-stats">
+          <div><dt>Files</dt><dd id="live-files">0</dd></div>
+          <div><dt>Folders</dt><dd id="live-dirs">0</dd></div>
+          <div><dt>Rate</dt><dd id="live-rate">–</dd></div>
+          <div><dt>Elapsed</dt><dd id="live-elapsed">0 s</dd></div>
+          <div><dt>Unreadable</dt><dd id="live-errors">0</dd></div>
         </dl>
+        <div class="scan-live-actions">
+          <button type="button" class="btn btn-ghost" id="btn-cancel-scan">Cancel scan</button>
+          <span class="form-hint" id="live-phase"></span>
+        </div>
       </div>
-    </div>
+    </section>
 
-    <div class="preview-actions">
-      <button id="preview-open-btn" class="btn btn-secondary btn-block">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-          <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
-        </svg>
-        Open in Finder
-      </button>
-      <button id="preview-stage-btn" class="btn btn-danger btn-block">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="3 6 5 6 21 6"/>
-          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-        </svg>
-        Stage for Deletion
-      </button>
-    </div>
-  </aside>
+    <!-- Browse a finished scan -->
+    <main id="browse" class="screen" aria-label="Scan results">
+      <div id="catbar" class="catbar"></div>
+      <div class="workspace">
+        <div class="canvas">
+          <div id="map-view" class="view" role="region" aria-label="Treemap"></div>
+          <div id="list-view" class="view" role="region" aria-label="File list" hidden></div>
+        </div>
+        <aside id="inspector" class="inspector" aria-label="Details"></aside>
+      </div>
+    </main>
 
-  <!-- Right Side Panel (Staging) -->
-  <aside id="staging-panel"></aside>
-
-  <!-- Config Modal -->
-  <div id="config-modal" class="modal-overlay hidden">
-    <div class="modal-dialog">
-      <div class="modal-header">
-        <h2>Settings</h2>
-        <button id="config-close-btn" class="icon-btn" aria-label="Close settings">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-        </button>
-      </div>
-      <div class="modal-body">
-        <fieldset class="config-group">
-          <legend>General</legend>
-          <label class="config-row">
-            <span>API Base URL</span>
-            <input type="text" id="config-api-url" value="http://localhost:8000">
-          </label>
-          <label class="config-row">
-            <span>Top-N Count</span>
-            <input type="number" id="config-topn" value="100" min="10" max="1000">
-          </label>
-        </fieldset>
-        <fieldset class="config-group">
-          <legend>Display</legend>
-          <label class="config-row">
-            <span>Treemap Color Mode</span>
-            <select id="config-color-mode">
-              <option value="category">By Category</option>
-              <option value="size">By Size</option>
-              <option value="age">By Age</option>
-            </select>
-          </label>
-          <label class="config-row">
-            <span>Size Unit</span>
-            <select id="config-size-unit">
-              <option value="auto">Auto</option>
-              <option value="KB">KB</option>
-              <option value="MB">MB</option>
-              <option value="GB">GB</option>
-            </select>
-          </label>
-        </fieldset>
-        <fieldset class="config-group">
-          <legend>Safety</legend>
-          <label class="config-row checkbox-row">
-            <input type="checkbox" id="config-confirm-delete" checked>
-            <span>Confirm before deletion</span>
-          </label>
-          <label class="config-row checkbox-row">
-            <input type="checkbox" id="config-trash" checked>
-            <span>Move to Trash instead of permanent delete</span>
-          </label>
-        </fieldset>
-      </div>
-      <div class="modal-footer">
-        <button id="config-save-btn" class="btn btn-primary">Save Settings</button>
-      </div>
-    </div>
+    <footer id="tray" class="tray" aria-label="Marked for removal"></footer>
   </div>
 
-  <!-- Delete Confirmation Modal -->
-  <div id="delete-confirm-modal" class="modal-overlay hidden">
-    <div class="modal-dialog modal-sm">
-      <div class="modal-header modal-header-danger">
-        <h2>Confirm Deletion</h2>
-      </div>
-      <div class="modal-body">
-        <p id="delete-confirm-text">Are you sure you want to delete <strong>0 items</strong> (<strong>0 B</strong>)?</p>
-        <p class="delete-warning">This action cannot be undone.</p>
-      </div>
-      <div class="modal-footer">
-        <button id="delete-cancel-btn" class="btn btn-ghost">Cancel</button>
-        <button id="delete-confirm-btn" class="btn btn-danger">Delete Permanently</button>
-      </div>
-    </div>
-  </div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <div id="modal-root"></div>
 
-  <!-- Module Scripts -->
-  <script type="module" src="app.js"></script>
-  <script type="module" src="scan-panel.js"></script>
-  <script type="module" src="filter-bar.js"></script>
-  <script type="module" src="main-view.js"></script>
-  <script type="module" src="treemap.js"></script>
-  <script type="module" src="topn-list.js"></script>
-  <script type="module" src="preview-panel.js"></script>
-  <script type="module" src="staging-panel.js"></script>
-  <script type="module" src="config-panel.js"></script>
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>

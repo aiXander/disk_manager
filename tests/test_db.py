@@ -8,209 +8,257 @@ import time
 import pytest
 
 from backend.db import (
+    SCHEMA_VERSION,
     batch_insert,
-    compute_directory_sizes,
     count_query,
-    delete_records,
+    get_node,
     get_tree_data,
     init_db,
     query_files,
+    remove_deleted,
     vacuum_db,
 )
 
 SCAN_ID = "test_scan"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _make_record(
-    path: str,
-    name: str,
-    *,
-    is_dir: bool = False,
-    size: int = 0,
-    depth: int = 0,
-    parent_path: str | None = None,
-    extension: str = "",
-) -> dict:
-    """Return a node dict with all required columns and sensible defaults."""
+def _rec(path, *, is_dir=False, size=0, apparent=None, count=None, depth=0,
+         parent=None, collapsed=0, extension="") -> dict:
     now = time.time()
     return {
         "path": path,
-        "name": name,
+        "name": path.rsplit("/", 1)[-1] or path,
         "extension": extension,
         "size": size,
+        "apparent_size": size if apparent is None else apparent,
+        "file_count": (0 if is_dir else 1) if count is None else count,
         "mtime": now,
         "atime": now,
         "ctime": now,
         "birthtime": now,
         "is_dir": int(is_dir),
         "depth": depth,
-        "parent_path": parent_path,
+        "parent_path": parent,
+        "collapsed": collapsed,
     }
-
-
-def _insert_scan_meta(conn: sqlite3.Connection, scan_id: str = SCAN_ID) -> None:
-    """Insert the mandatory scan_meta row so the FK constraint is satisfied."""
-    conn.execute(
-        "INSERT OR IGNORE INTO scan_meta (scan_id, started_at, status) VALUES (?, ?, ?)",
-        (scan_id, time.time(), "running"),
-    )
-    conn.commit()
 
 
 @pytest.fixture()
 def conn(tmp_path):
-    """Yield a fresh DB connection backed by a file inside tmp_path."""
-    db_path = tmp_path / "test.db"
-    connection = init_db(db_path)
-    _insert_scan_meta(connection)
+    connection = init_db(tmp_path / "test.db")
+    connection.execute(
+        "INSERT INTO scan_meta (scan_id, started_at, status, total_files, total_bytes) "
+        "VALUES (?, ?, 'complete', 3, 180)",
+        (SCAN_ID, time.time()),
+    )
+    connection.commit()
     yield connection
     connection.close()
 
 
+@pytest.fixture()
+def tree(conn):
+    """/r (180) -> a/ (150: x 100, y 50), ab.txt 30."""
+    batch_insert(conn, [
+        _rec("/r", is_dir=True, size=180, count=3),
+        _rec("/r/a", is_dir=True, size=150, count=2, depth=1, parent="/r"),
+        _rec("/r/a/x", size=100, depth=2, parent="/r/a"),
+        _rec("/r/a/y", size=50, depth=2, parent="/r/a"),
+        _rec("/r/ab.txt", size=30, depth=1, parent="/r", extension=".txt"),
+    ])
+    return conn
+
+
 # ---------------------------------------------------------------------------
-# Tests
+# Schema & migration
 # ---------------------------------------------------------------------------
 
-def test_init_db(tmp_path):
-    """init_db creates the database with scan_meta and nodes tables."""
-    db_path = tmp_path / "init_test.db"
-    connection = init_db(db_path)
+def test_init_db_schema(tmp_path):
+    c = init_db(tmp_path / "fresh.db")
     try:
-        tables = {
-            row["name"]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
-        }
-        assert "scan_meta" in tables
-        assert "nodes" in tables
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"scan_meta", "nodes", "staged_items"} <= tables
+        cols = {r[1] for r in c.execute("PRAGMA table_info(nodes)")}
+        assert {"apparent_size", "file_count", "collapsed"} <= cols
+        assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        idx = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        assert "idx_nodes_path" in idx
     finally:
-        connection.close()
+        c.close()
 
 
-def test_batch_insert(conn):
-    """Inserting 10 records stores them all in the nodes table."""
-    records = [
-        _make_record(f"/tmp/file_{i}.txt", f"file_{i}.txt", extension=".txt", size=100 * i)
-        for i in range(10)
-    ]
-    batch_insert(conn, records)
-
-    row = conn.execute("SELECT COUNT(*) AS cnt FROM nodes").fetchone()
-    assert row["cnt"] == 10
-
-
-def test_batch_insert_empty(conn):
-    """Passing an empty list is a no-op and does not raise."""
-    batch_insert(conn, [])
-
-    row = conn.execute("SELECT COUNT(*) AS cnt FROM nodes").fetchone()
-    assert row["cnt"] == 0
+def test_init_db_skips_indexes_while_scan_running(tmp_path):
+    path = tmp_path / "running.db"
+    c = init_db(path)
+    c.execute("INSERT INTO scan_meta (scan_id, status) VALUES ('s', 'running')")
+    c.execute("DROP INDEX idx_nodes_path")
+    c.commit()
+    c.close()
+    c = init_db(path)
+    idx = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    c.close()
+    assert "idx_nodes_path" not in idx
 
 
-def test_compute_directory_sizes(conn):
-    """Parent directory size equals the sum of its children after rollup."""
-    records = [
-        _make_record("/project", "project", is_dir=True, depth=0, parent_path=None),
-        _make_record("/project/a.txt", "a.txt", extension=".txt", size=300, depth=1, parent_path="/project"),
-        _make_record("/project/b.txt", "b.txt", extension=".txt", size=700, depth=1, parent_path="/project"),
-    ]
-    batch_insert(conn, records)
-
-    compute_directory_sizes(conn)
-
-    row = conn.execute("SELECT size FROM nodes WHERE path = '/project'").fetchone()
-    assert row["size"] == 1000
-
-
-def test_get_tree_data(conn):
-    """get_tree_data returns a nested structure with correct children."""
-    records = [
-        _make_record("/root", "root", is_dir=True, depth=0, parent_path=None),
-        _make_record("/root/dir", "dir", is_dir=True, depth=1, parent_path="/root"),
-        _make_record("/root/dir/f1.py", "f1.py", extension=".py", size=50, depth=2, parent_path="/root/dir"),
-        _make_record("/root/dir/f2.py", "f2.py", extension=".py", size=80, depth=2, parent_path="/root/dir"),
-    ]
-    batch_insert(conn, records)
-
-    tree = get_tree_data(conn, "/root", depth=3)
-
-    assert tree["name"] == "root"
-    assert tree["is_dir"] is True
-    assert len(tree["children"]) == 1
-
-    child_dir = tree["children"][0]
-    assert child_dir["name"] == "dir"
-    assert child_dir["is_dir"] is True
-    assert len(child_dir["children"]) == 2
-
-    child_names = {c["name"] for c in child_dir["children"]}
-    assert child_names == {"f1.py", "f2.py"}
-
-    # Leaf files should have no children key (pruned).
-    for leaf in child_dir["children"]:
-        assert "children" not in leaf
+_OLD_SCHEMA = """
+CREATE TABLE scan_meta (scan_id TEXT PRIMARY KEY, started_at REAL, finished_at REAL,
+    roots TEXT, max_depth INTEGER, status TEXT NOT NULL DEFAULT 'running',
+    total_files INTEGER NOT NULL DEFAULT 0, total_dirs INTEGER NOT NULL DEFAULT 0,
+    total_bytes INTEGER NOT NULL DEFAULT 0, error_msg TEXT);
+CREATE TABLE nodes (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+    extension TEXT NOT NULL DEFAULT '', size INTEGER NOT NULL DEFAULT 0, mtime REAL NOT NULL,
+    atime REAL NOT NULL, ctime REAL NOT NULL, birthtime REAL, is_dir INTEGER NOT NULL,
+    depth INTEGER NOT NULL, parent_path TEXT);
+CREATE INDEX idx_parent ON nodes (parent_path);
+CREATE INDEX idx_size_desc ON nodes (size DESC);
+CREATE TABLE staged_items (path TEXT PRIMARY KEY, name TEXT NOT NULL,
+    size INTEGER NOT NULL DEFAULT 0, is_dir INTEGER NOT NULL, extension TEXT NOT NULL DEFAULT '');
+INSERT INTO scan_meta (scan_id, status) VALUES ('old', 'complete');
+INSERT INTO nodes (path, name, size, mtime, atime, ctime, is_dir, depth, parent_path) VALUES
+    ('/r', 'r', 60, 0, 0, 0, 1, 0, NULL),
+    ('/r/d', 'd', 40, 0, 0, 0, 1, 1, '/r'),
+    ('/r/d/f1', 'f1', 10, 0, 0, 0, 0, 2, '/r/d'),
+    ('/r/d/f2', 'f2', 30, 0, 0, 0, 0, 2, '/r/d'),
+    ('/r/node_modules', 'node_modules', 20, 0, 0, 0, 1, 1, '/r');
+"""
 
 
-def test_query_files(conn):
-    """query_files executes a SELECT and returns rows as dicts."""
-    records = [
-        _make_record("/a.txt", "a.txt", extension=".txt", size=10),
-        _make_record("/b.log", "b.log", extension=".log", size=20),
-        _make_record("/c.txt", "c.txt", extension=".txt", size=30),
-    ]
-    batch_insert(conn, records)
+def test_old_db_is_migrated(tmp_path):
+    path = tmp_path / "old.db"
+    raw = sqlite3.connect(str(path))
+    raw.executescript(_OLD_SCHEMA)
+    raw.close()
 
-    results = query_files(
-        conn,
-        "SELECT path, size FROM nodes WHERE extension = ?",
-        [".txt"],
-    )
-    assert len(results) == 2
-    paths = {r["path"] for r in results}
-    assert paths == {"/a.txt", "/c.txt"}
-
-
-def test_count_query(conn):
-    """count_query returns the correct number of matching rows."""
-    records = [
-        _make_record(f"/file_{i}.dat", f"file_{i}.dat", extension=".dat")
-        for i in range(5)
-    ]
-    batch_insert(conn, records)
-
-    count = count_query(
-        conn,
-        "SELECT * FROM nodes WHERE extension = ?",
-        [".dat"],
-    )
-    assert count == 5
+    c = init_db(path)
+    try:
+        assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        rows = {r["path"]: r for r in c.execute("SELECT * FROM nodes")}
+        assert rows["/r/d/f2"]["apparent_size"] == 30
+        assert (rows["/r/d/f1"]["file_count"], rows["/r/d"]["file_count"]) == (1, 2)
+        assert rows["/r"]["file_count"] == 2
+        assert rows["/r/node_modules"]["collapsed"] == 1
+        assert rows["/r/d"]["collapsed"] == 0
+        idx = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        assert "idx_nodes_parent" in idx and "idx_size_desc" not in idx
+        t = get_tree_data(c, "/r", depth=2)
+        assert [k["name"] for k in t["children"]] == ["d", "node_modules"]
+        assert t["children"][0]["apparent_size"] == 40
+    finally:
+        c.close()
+    # Re-opening a migrated DB is a no-op.
+    init_db(path).close()
 
 
-def test_delete_records(conn):
-    """delete_records removes the specified paths and leaves the rest."""
-    records = [
-        _make_record("/keep.txt", "keep.txt", extension=".txt"),
-        _make_record("/gone1.txt", "gone1.txt", extension=".txt"),
-        _make_record("/gone2.txt", "gone2.txt", extension=".txt"),
-    ]
-    batch_insert(conn, records)
+# ---------------------------------------------------------------------------
+# remove_deleted
+# ---------------------------------------------------------------------------
 
-    delete_records(conn, ["/gone1.txt", "/gone2.txt"])
-
-    remaining = query_files(conn, "SELECT path FROM nodes", [])
-    assert len(remaining) == 1
-    assert remaining[0]["path"] == "/keep.txt"
+def _sizes(conn):
+    return {r["path"]: (r["size"], r["apparent_size"], r["file_count"])
+            for r in conn.execute("SELECT * FROM nodes")}
 
 
-def test_vacuum_db(conn):
-    """vacuum_db completes without error."""
-    records = [_make_record("/v.txt", "v.txt")]
-    batch_insert(conn, records)
+def test_remove_deleted_dir_updates_ancestors(tree):
+    remove_deleted(tree, ["/r/a"])
+    assert _sizes(tree) == {"/r": (30, 30, 1), "/r/ab.txt": (30, 30, 1)}
+    meta = tree.execute("SELECT total_files, total_bytes FROM scan_meta").fetchone()
+    assert tuple(meta) == (1, 30)
 
-    # Should not raise.
-    vacuum_db(conn)
+
+def test_remove_deleted_does_not_touch_prefix_siblings(tree):
+    """Deleting /r/a must not delete /r/ab.txt (shares the string prefix)."""
+    remove_deleted(tree, ["/r/a/x"])
+    s = _sizes(tree)
+    assert "/r/ab.txt" in s and "/r/a/y" in s and "/r/a/x" not in s
+    assert s["/r/a"] == (50, 50, 1)
+    assert s["/r"] == (80, 80, 2)
+
+
+def test_remove_deleted_nested_paths_subtract_once(tree):
+    remove_deleted(tree, ["/r/a/x", "/r/a", "/r/a/"])
+    assert _sizes(tree)["/r"] == (30, 30, 1)
+
+
+def test_remove_deleted_unknown_and_empty(tree):
+    remove_deleted(tree, [])
+    remove_deleted(tree, ["/nope"])
+    assert _sizes(tree)["/r"] == (180, 180, 3)
+
+
+# ---------------------------------------------------------------------------
+# get_tree_data / get_node
+# ---------------------------------------------------------------------------
+
+def test_get_tree_data_nested(tree):
+    t = get_tree_data(tree, "/r", depth=3)
+    assert (t["name"], t["is_dir"], t["size"], t["file_count"]) == ("r", True, 180, 3)
+    assert [c["name"] for c in t["children"]] == ["a", "ab.txt"]  # size desc
+    a = t["children"][0]
+    assert [c["name"] for c in a["children"]] == ["x", "y"]
+    assert all("children" not in leaf for leaf in a["children"])
+    assert set(a) >= {"name", "path", "size", "apparent_size", "file_count", "is_dir", "collapsed"}
+
+
+def test_get_tree_data_depth_limit(tree):
+    t = get_tree_data(tree, "/r", depth=1)
+    assert "children" not in t["children"][0]
+    assert "children" not in get_tree_data(tree, "/r", depth=0)
+
+
+def test_get_tree_data_unknown_root(tree):
+    assert get_tree_data(tree, "/missing", depth=2) == {}
+
+
+def test_get_tree_data_folds_small_children(conn):
+    recs = [_rec("/big", is_dir=True, size=55, count=10)]
+    recs += [_rec(f"/big/f{i}", size=i, depth=1, parent="/big") for i in range(1, 11)]
+    batch_insert(conn, recs)
+
+    t = get_tree_data(conn, "/big", depth=1, max_children=3)
+    kids = t["children"]
+    assert [k["size"] for k in kids[:3]] == [10, 9, 8]
+    other = kids[3]
+    assert len(kids) == 4
+    assert other["is_other"] is True and other["path"] is None
+    assert other["count"] == 7 and other["name"] == "7 smaller items"
+    assert other["size"] == sum(range(1, 8)) and other["file_count"] == 7
+
+    assert len(get_tree_data(conn, "/big", depth=1, max_children=10)["children"]) == 10
+
+
+def test_get_tree_data_does_not_expand_collapsed(conn):
+    batch_insert(conn, [
+        _rec("/c", is_dir=True, size=5, count=1),
+        _rec("/c/node_modules", is_dir=True, size=5, count=1, depth=1, parent="/c", collapsed=1),
+    ])
+    nm = get_tree_data(conn, "/c", depth=3)["children"][0]
+    assert nm["collapsed"] is True and "children" not in nm
+
+
+def test_get_node(tree):
+    node = get_node(tree, "/r/a/x")
+    assert node["size"] == 100 and node["parent_path"] == "/r/a"
+    assert get_node(tree, "/nope") is None
+
+
+# ---------------------------------------------------------------------------
+# Misc helpers
+# ---------------------------------------------------------------------------
+
+def test_batch_insert_defaults(conn):
+    batch_insert(conn, [{
+        "path": "/f", "name": "f", "size": 7, "mtime": 0, "atime": 0, "ctime": 0,
+        "is_dir": 0, "depth": 0,
+    }])
+    n = get_node(conn, "/f")
+    assert (n["apparent_size"], n["file_count"], n["collapsed"]) == (7, 1, 0)
+
+
+def test_query_and_count(tree):
+    rows = query_files(tree, "SELECT path FROM nodes WHERE extension = ?", [".txt"])
+    assert [r["path"] for r in rows] == ["/r/ab.txt"]
+    assert count_query(tree, "SELECT * FROM nodes WHERE is_dir = ?", [0]) == 3
+
+
+def test_vacuum_db(tree):
+    vacuum_db(tree)

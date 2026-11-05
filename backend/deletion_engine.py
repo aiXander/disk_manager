@@ -1,4 +1,9 @@
-"""Executes staged deletions using send2trash (Trash) or permanent delete."""
+"""Executes staged deletions: move to Trash (default) or permanent delete.
+
+Blocking; call it off the event loop. Byte counts come from the scan DB sizes
+passed in by the caller, never from re-walking the disk. Trash failures are
+reported as failures; there is no silent fallback to permanent deletion.
+"""
 
 from __future__ import annotations
 
@@ -6,24 +11,24 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass, field
-from pathlib import Path
+
+from backend.staging_manager import covered_by_staged_dir
 
 logger = logging.getLogger(__name__)
 
 try:
     import send2trash as _send2trash
-except ImportError:
+except ImportError:  # pragma: no cover - dependency is declared in pyproject
     _send2trash = None
-    logger.warning(
-        "send2trash is not installed. Trash-based deletion will not be available. "
-        "Install it with: uv add send2trash"
-    )
+
+MISSING_ERROR = "no longer exists on disk"
 
 
 @dataclass
 class DeletionResult:
     deleted: list[str] = field(default_factory=list)
     failed: list[tuple[str, str]] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)  # also listed in `failed`
     bytes_freed: int = 0
 
     def to_dict(self) -> dict:
@@ -35,109 +40,58 @@ class DeletionResult:
 
 
 def _deduplicate_paths(paths: list[str]) -> list[str]:
-    """Remove child paths whose parent directory is already in the list.
+    """Drop paths that sit under another path in the list (deleting the ancestor covers them).
 
-    If a parent directory is staged for deletion, its children will be deleted
-    along with it, so we skip them to avoid errors or double-counting.
+    Pure path logic, no disk access: only a directory can have descendants, so
+    any listed ancestor is necessarily a directory.
     """
-    # Sort by depth (shallowest first) so parents come before children.
-    sorted_paths = sorted(paths, key=lambda p: p.count(os.sep))
-
-    kept: list[str] = []
-    kept_dirs: set[str] = set()
-
-    for path in sorted_paths:
-        # Check if any already-kept directory is a parent of this path.
-        parent = Path(path).parent
-        skip = False
-        while str(parent) != parent.anchor:
-            if str(parent) in kept_dirs:
-                skip = True
-                break
-            parent = parent.parent
-
-        if not skip:
-            kept.append(path)
-            if Path(path).is_dir():
-                kept_dirs.add(path)
-
-    return kept
+    unique = list(dict.fromkeys(p.rstrip("/") or "/" for p in paths))
+    listed = set(unique)
+    return [p for p in unique if not covered_by_staged_dir(p, listed)]
 
 
-def _get_size(path: str) -> int:
-    """Get size of a file or directory. Returns 0 on error."""
-    try:
-        p = Path(path)
-        if p.is_file():
-            return p.stat().st_size
-        elif p.is_dir():
-            total = 0
-            for entry in p.rglob("*"):
-                if entry.is_file():
-                    try:
-                        total += entry.stat().st_size
-                    except OSError:
-                        pass
-            return total
-    except OSError:
-        pass
-    return 0
-
-
-def _trash_item(path: str) -> None:
-    """Move a single item to the system Trash via send2trash."""
+def _trash(path: str) -> None:
     if _send2trash is None:
-        raise RuntimeError(
-            "send2trash is not installed. Cannot move items to Trash. "
-            "Install it with: uv add send2trash"
-        )
+        raise RuntimeError("send2trash is not installed; cannot move items to Trash")
     _send2trash.send2trash(path)
 
 
-def execute_deletion(paths: list[str], permanent: bool) -> DeletionResult:
-    """Execute deletion for the given paths.
+def _remove_permanently(path: str) -> None:
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    else:
+        os.remove(path)
 
-    Args:
-        paths: List of absolute file/directory paths to delete.
-        permanent: If True, permanently delete. If False, move to Trash.
 
-    Returns:
-        DeletionResult with lists of deleted/failed paths and bytes freed.
+def execute_deletion(
+    paths: list[str],
+    permanent: bool,
+    sizes: dict[str, int] | None = None,
+) -> DeletionResult:
+    """Delete *paths* (trash unless *permanent*).
+
+    *sizes* maps path -> bytes from the scan DB; ``bytes_freed`` sums it over
+    the paths actually deleted. Paths already gone from disk are reported in
+    ``failed`` (error ``MISSING_ERROR``) and in ``missing``.
     """
+    sizes = sizes or {}
     result = DeletionResult()
-    deduped = _deduplicate_paths(paths)
-
-    # Separate into directories and files.
-    dirs: list[str] = []
-    files: list[str] = []
-    for p in deduped:
-        if Path(p).is_dir():
-            dirs.append(p)
-        else:
-            files.append(p)
-
-    # Sort directories deepest-first so children are removed before parents.
-    dirs.sort(key=lambda p: p.count(os.sep), reverse=True)
-
-    # Process files first, then directories (deepest first).
-    for path in files + dirs:
-        size = _get_size(path)
+    for path in _deduplicate_paths(paths):
+        if not os.path.lexists(path):
+            result.failed.append((path, MISSING_ERROR))
+            result.missing.append(path)
+            continue
         try:
             if permanent:
-                if Path(path).is_file():
-                    os.remove(path)
-                else:
-                    shutil.rmtree(path)
+                _remove_permanently(path)
             else:
-                _trash_item(path)
-
-            result.deleted.append(path)
-            result.bytes_freed += size
-            logger.info("Deleted: %s (%d bytes)", path, size)
-
+                _trash(path)
         except Exception as exc:
-            error_msg = f"{type(exc).__name__}: {exc}"
-            result.failed.append((path, error_msg))
-            logger.error("Failed to delete %s: %s", path, error_msg)
-
+            msg = f"{type(exc).__name__}: {exc}"
+            result.failed.append((path, msg))
+            logger.error("Failed to delete %s: %s", path, msg)
+            continue
+        result.deleted.append(path)
+        result.bytes_freed += sizes.get(path, 0)
+        logger.info("%s %s (%d bytes)", "Deleted" if permanent else "Trashed", path, sizes.get(path, 0))
     return result
